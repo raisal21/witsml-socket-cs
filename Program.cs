@@ -39,6 +39,8 @@ app.UseWebSockets(new WebSocketOptions
     KeepAliveInterval = TimeSpan.FromSeconds(10),
 });
 
+TilesController.Map(app);
+
 app.Map("/", async (HttpContext ctx, WebSocketHub hub, IHostApplicationLifetime life) =>
 {
     if (!ctx.WebSockets.IsWebSocketRequest)
