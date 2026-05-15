@@ -31,6 +31,7 @@ builder.Services.AddHostedService<TelemetryService>();
 builder.Services.AddHostedService<PingService>();
 builder.Services.AddHostedService<AlarmPurgeService>();
 builder.Services.AddHostedService<PersistenceService>();
+builder.Services.AddHostedService<RetentionJob>();
 
 var app = builder.Build();
 

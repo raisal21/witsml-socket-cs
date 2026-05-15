@@ -9,7 +9,8 @@ Replaces the Node + `ws` TypeScript stub with .NET 9 + ASP.NET Core. Same `ws://
 - **Phase 1 (in):** WS handshake, sub/unsub, binary broadcast (DRILL=101 / GEO=102), alarm raise/ack/purge, slow-client detection, graceful shutdown.
 - **Phase 2 (in):** QuestDB persistence via ILP TCP (writes) + HTTP `/exec` (schema bootstrap). Bounded `Channel<SampleRow>` with `DropOldest` so broadcast hot path never blocks on DB lag. Auto-reconnect on socket failure.
 - **Phase 3 (in):** `GET /api/tiles` endpoint — pre-aggregated `min/max/avg` bins per trace via QuestDB `SAMPLE BY` over Pg-wire (Npgsql). Validates span × res before query.
-- **Still out:** retention job, Timescale alt backend, auth, real WITSML 2.x / ETP.
+- **Retention (in):** `RetentionJob` BackgroundService — drops QuestDB partitions older than `TimeSeries:RetentionDays` (default 7) on startup + every 24h. Safety guard rejects `< 1` (prevents live-data wipe).
+- **Still out:** Timescale alt backend, auth, real WITSML 2.x / ETP.
 
 ## Run
 
@@ -35,6 +36,7 @@ Handlers.cs     HANDSHAKE / SUBSCRIBE / UNSUBSCRIBE / ALARM_ACK
 Services.cs     TelemetryService (10Hz) + PingService + AlarmPurgeService
 Persistence.cs  SampleRow + ITimeSeriesStore + QuestDbStore + PersistenceService
 Tiles.cs        TileResponse DTOs + ResolutionPicker + TilesController (/api/tiles)
+                RetentionJob lives in Persistence.cs (drops partitions older than N days)
 ```
 
 ## Smoke test
@@ -114,4 +116,6 @@ QuestDB down    → broadcast continues at full rate, droppedFrames=0
 QuestDB back    → auto-reconnect, "write recovered after N failures" log line
 Tile happy path → 1066 raw rows → 25 1s-bins via SAMPLE BY in <50 ms
 Tile bad input  → 400 with code + message; never returns 500 for known errors
+Retention=5     → 10-day-old partition dropped, today's partition kept
+Retention=0     → disabled with WARN log, no DDL run
 ```

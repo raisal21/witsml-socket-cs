@@ -30,6 +30,7 @@ internal interface ITimeSeriesStore
 {
     Task EnsureSchemaAsync(CancellationToken ct);
     Task WriteBatchAsync(IReadOnlyList<SampleRow> batch, CancellationToken ct);
+    Task<int> DropPartitionsOlderThanAsync(int retentionDays, CancellationToken ct);
 }
 
 // =============================================================================
@@ -55,6 +56,41 @@ internal sealed class QuestDbStore : ITimeSeriesStore, IAsyncDisposable
         _ilpHost = parts[0];
         _ilpPort = parts.Length > 1 ? int.Parse(parts[1], CultureInfo.InvariantCulture) : 9009;
         _httpBase = section["HttpEndpoint"] ?? "http://localhost:9000";
+    }
+
+    public async Task<int> DropPartitionsOlderThanAsync(int retentionDays, CancellationToken ct)
+    {
+        if (retentionDays < 1)
+            throw new ArgumentOutOfRangeException(nameof(retentionDays), "retentionDays must be >= 1 to avoid dropping live data");
+
+        var statements = new[]
+        {
+            $"ALTER TABLE drill_samples DROP PARTITION WHERE ts < dateadd('d', -{retentionDays}, now())",
+            $"ALTER TABLE geo_samples DROP PARTITION WHERE ts < dateadd('d', -{retentionDays}, now())",
+        };
+
+        int dropped = 0;
+        using var http = new HttpClient { BaseAddress = new Uri(_httpBase) };
+        foreach (var sql in statements)
+        {
+            var url = $"/exec?query={Uri.EscapeDataString(sql)}";
+            using var res = await http.GetAsync(url, ct);
+            var body = await res.Content.ReadAsStringAsync(ct);
+
+            if (!res.IsSuccessStatusCode)
+            {
+                // QuestDB returns 400 with "could not remove partition" when no partition matches — treat as no-op
+                if (body.Contains("could not remove", StringComparison.OrdinalIgnoreCase) ||
+                    body.Contains("no partitions", StringComparison.OrdinalIgnoreCase))
+                {
+                    _log.LogDebug("[RETENTION] no-op: {Body}", body);
+                    continue;
+                }
+                throw new InvalidOperationException($"DROP PARTITION failed: {res.StatusCode} {body}");
+            }
+            dropped++;
+        }
+        return dropped;
     }
 
     public async Task EnsureSchemaAsync(CancellationToken ct)
@@ -273,5 +309,52 @@ internal sealed class PersistenceService(
             }
         }
         log.LogError("[PERSIST] schema bootstrap gave up — persistence will keep retrying on writes");
+    }
+}
+
+// =============================================================================
+// Retention job — drops partitions older than RetentionDays, daily
+// =============================================================================
+
+internal sealed class RetentionJob(
+    ITimeSeriesStore store,
+    IConfiguration cfg,
+    ILogger<RetentionJob> log) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        var days = cfg.GetValue("TimeSeries:RetentionDays", 7);
+        if (days < 1)
+        {
+            log.LogWarning("[RETENTION] disabled — RetentionDays={Days} (<1)", days);
+            return;
+        }
+
+        // Initial settle delay so QuestDB and schema bootstrap finish first
+        try { await Task.Delay(TimeSpan.FromSeconds(15), ct); }
+        catch (OperationCanceledException) { return; }
+
+        await RunOnceAsync(days, ct);
+
+        using var timer = new PeriodicTimer(TimeSpan.FromHours(24));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+                await RunOnceAsync(days, ct);
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task RunOnceAsync(int days, CancellationToken ct)
+    {
+        try
+        {
+            var n = await store.DropPartitionsOlderThanAsync(days, ct);
+            log.LogInformation("[RETENTION] dropped {N} table partition(s) older than {Days}d", n, days);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "[RETENTION] drop failed — will retry tomorrow");
+        }
     }
 }
