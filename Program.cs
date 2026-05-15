@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Threading.Channels;
 using WitsmlSocket;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -15,9 +16,21 @@ builder.Logging.AddSimpleConsole(o =>
 builder.Services.AddSingleton<RigState>();
 builder.Services.AddSingleton<AlarmRegistry>();
 builder.Services.AddSingleton<WebSocketHub>();
+
+// Persistence channel — bounded, DropOldest so DB lag never blocks broadcast.
+var persistenceChannel = Channel.CreateBounded<SampleRow>(new BoundedChannelOptions(5_000)
+{
+    FullMode = BoundedChannelFullMode.DropOldest,
+    SingleReader = true,
+});
+builder.Services.AddSingleton(persistenceChannel.Writer);
+builder.Services.AddSingleton(persistenceChannel.Reader);
+builder.Services.AddSingleton<ITimeSeriesStore, QuestDbStore>();
+
 builder.Services.AddHostedService<TelemetryService>();
 builder.Services.AddHostedService<PingService>();
 builder.Services.AddHostedService<AlarmPurgeService>();
+builder.Services.AddHostedService<PersistenceService>();
 
 var app = builder.Build();
 
