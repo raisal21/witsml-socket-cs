@@ -182,10 +182,9 @@ internal sealed class WebSocketHub
         catch (WebSocketException) { }
     }
 
-    // =========================================================================
+    // =============================================================================
     // Send helpers
-    // =========================================================================
-
+    // =============================================================================
     public ValueTask SendJsonAsync<T>(ConnectedClient client, string messageType, T? payload, ErrorPayload? error = null)
     {
         var envelope = new ServerMessage<T>
@@ -258,10 +257,9 @@ internal sealed class WebSocketHub
         }
     }
 
-    // =========================================================================
+    // =============================================================================
     // Broadcast
-    // =========================================================================
-
+    // =============================================================================
     public void BroadcastBinary(StreamDef stream, ReadOnlySpan<byte> frame)
     {
         var subs = StreamSubs[stream];
@@ -298,9 +296,8 @@ internal sealed class WebSocketHub
 }
 
 // =============================================================================
-// Binary frame writer — big-endian, layout per CSHARP_PORT_PLAN.md
+// Binary frame writer — big-endian, layout per README.md wire format
 // =============================================================================
-
 internal static class FrameWriter
 {
     public static void WriteDrill(Span<byte> dst, RigState s, uint seq)
