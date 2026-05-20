@@ -73,6 +73,7 @@ internal sealed class WebSocketHub
                 StreamSubs[s].TryRemove(clientId, out _);
             Clients.TryRemove(clientId, out _);
             client.HandshakeTimer?.Dispose();
+            client.SendGate.Dispose();
 
             lock (client.StateLock)
                 StateMachine.TryTransition(ref client.State, ClientState.Closed);
@@ -149,8 +150,6 @@ internal sealed class WebSocketHub
 
             await Handlers.DispatchAsync(this, client, msg, _alarms);
 
-            // Pong substitute: any inbound bumps liveness
-            client.IsAlive = true;
             if (client.State == ClientState.Idle)
             {
                 lock (client.StateLock)
@@ -167,7 +166,13 @@ internal sealed class WebSocketHub
             {
                 if (client.Socket.State != WebSocketState.Open) return;
                 var type = frame.IsBinary ? WebSocketMessageType.Binary : WebSocketMessageType.Text;
-                await client.Socket.SendAsync(frame.Payload, type, endOfMessage: true, ct);
+                await client.SendGate.WaitAsync(ct);
+                try
+                {
+                    if (client.Socket.State != WebSocketState.Open) return;
+                    await client.Socket.SendAsync(frame.Payload, type, endOfMessage: true, ct);
+                }
+                finally { client.SendGate.Release(); }
             }
         }
         catch (OperationCanceledException) { }
@@ -196,22 +201,36 @@ internal sealed class WebSocketHub
 
     public async Task CloseAsync(ConnectedClient client, string code, int closeCode, string reason, bool retryable)
     {
-        await SendJsonAsync(client, "CLOSING", new ClosingPayload
+        var envelope = new ServerMessage<ClosingPayload>
         {
-            code = code,
-            reason = reason,
-            retryable = retryable,
-            closeCode = closeCode,
-        });
+            messageType = "CLOSING",
+            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            payload = new ClosingPayload
+            {
+                code = code,
+                reason = reason,
+                retryable = retryable,
+                closeCode = closeCode,
+            },
+        };
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, JsonOpts.Default);
 
         lock (client.StateLock)
             StateMachine.TryTransition(ref client.State, ClientState.Closing);
 
+        // Send CLOSING then close under SendGate — the gate is shared with the send
+        // loop, so the CLOSING frame is flushed before the close handshake (no race).
+        await client.SendGate.WaitAsync();
         try
         {
-            await client.Socket.CloseAsync((WebSocketCloseStatus)closeCode, reason, CancellationToken.None);
+            if (client.Socket.State == WebSocketState.Open)
+            {
+                await client.Socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+                await client.Socket.CloseAsync((WebSocketCloseStatus)closeCode, reason, CancellationToken.None);
+            }
         }
         catch { }
+        finally { client.SendGate.Release(); }
 
         client.HandshakeTimer?.Cancel();
     }

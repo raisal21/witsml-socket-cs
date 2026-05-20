@@ -106,13 +106,13 @@ internal sealed class ConnectedClient
     public required WebSocket Socket { get; init; }
     public required Channel<OutboundFrame> Outbound { get; init; }
     public ClientState State;
-    public bool IsAlive = true;
     public long LastActivityUtc;
     public HashSet<StreamDef> Subscriptions { get; } = [];
     public long? SlowSinceUtc;
     public int DroppedFrames;
     public CancellationTokenSource? HandshakeTimer;
     public readonly object StateLock = new();
+    public readonly SemaphoreSlim SendGate = new(1, 1);
 }
 
 internal readonly record struct OutboundFrame(bool IsBinary, ReadOnlyMemory<byte> Payload);

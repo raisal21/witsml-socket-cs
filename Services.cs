@@ -104,17 +104,17 @@ internal sealed class PingService(WebSocketHub hub, ILogger<PingService> log) : 
                 var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 foreach (var (_, client) in hub.Clients)
                 {
-                    if (!client.IsAlive)
+                    var idleMs = now - client.LastActivityUtc;
+                    if (idleMs > Constants.LivenessTimeoutMs)
                     {
-                        log.LogWarning("[PING] No pong from {Id} — terminating", client.ClientId);
+                        log.LogWarning("[PING] {Id} silent for {Ms}ms — terminating", client.ClientId, idleMs);
                         lock (client.StateLock)
                             StateMachine.TryTransition(ref client.State, ClientState.Closing);
                         try { client.Socket.Abort(); } catch { }
                         continue;
                     }
-                    client.IsAlive = false;
 
-                    if (client.State == ClientState.Active && now - client.LastActivityUtc > Constants.IdleTimeoutMs)
+                    if (client.State == ClientState.Active && idleMs > Constants.IdleTimeoutMs)
                     {
                         lock (client.StateLock)
                             StateMachine.TryTransition(ref client.State, ClientState.Idle);

@@ -20,6 +20,7 @@ internal static class Constants
     public const int HandshakeTimeoutMs = 5_000;
     public const int IdleTimeoutMs = 15_000;
     public const int PingIntervalMs = 10_000;
+    public const int LivenessTimeoutMs = 30_000;
     public const int SlowTimeoutMs = 5_000;
     public const int OutboundQueueDepth = 64;
     public const int TelemetryTickMs = 100;
