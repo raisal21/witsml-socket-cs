@@ -11,7 +11,7 @@ internal sealed class RigState
     public float Rpm = 120f;
     public float Wob = 20f;
     public float Torque = 5f;
-    public float Spp = 2500f;
+    public float Spp = 170f;
     public float Hkld = 200f;
     public float Gamma = 50f;
     public float Rop = 25f;

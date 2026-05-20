@@ -29,7 +29,7 @@ internal sealed class TelemetryService(
                 state.Rpm = Jitter(115f, 125f);
                 state.Wob = Jitter(18f, 22f);
                 state.Torque = Jitter(4f, 6f);
-                state.Spp = Jitter(2450f, 2550f);
+                state.Spp = Jitter(140f, 207f);
                 state.Hkld = Jitter(190f, 210f);
                 state.Flow = Jitter(1400f, 1600f);
 
