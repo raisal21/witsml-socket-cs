@@ -12,6 +12,7 @@ internal static class Handlers
             "SUBSCRIBE"   => HandleSubscribeAsync(hub, client, msg.payload),
             "UNSUBSCRIBE" => HandleUnsubscribeAsync(hub, client, msg.payload),
             "ALARM_ACK"   => HandleAlarmAckAsync(hub, client, msg.payload, alarms),
+            "HEARTBEAT"   => Task.CompletedTask,
             _             => HandleUnknownAsync(hub, client, msg.messageType ?? ""),
         };
     }
@@ -38,6 +39,12 @@ internal static class Handlers
         if (hs.protocolVersion != Constants.ProtocolVersion)
         {
             await hub.CloseAsync(client, "UNSUPPORTED_PROTOCOL", 4409, "Unsupported protocol version", false);
+            return;
+        }
+
+        if (string.IsNullOrEmpty(hub.HandshakeToken) || hs.token != hub.HandshakeToken)
+        {
+            await hub.CloseAsync(client, "UNAUTHORIZED", Constants.UnauthorizedClose, "Invalid or missing token", false);
             return;
         }
 

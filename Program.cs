@@ -57,6 +57,8 @@ app.Map("/", async (HttpContext ctx, WebSocketHub hub, IHostApplicationLifetime 
 });
 
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
+if (string.IsNullOrEmpty(app.Configuration["Auth:HandshakeToken"]))
+    logger.LogWarning("[AUTH] Auth:HandshakeToken is not set — fail-closed: all handshakes will be rejected");
 logger.LogInformation("[SERVER] witsml-socket listening on ws://0.0.0.0:{Port}", Constants.Port);
 
 var hubInstance = app.Services.GetRequiredService<WebSocketHub>();

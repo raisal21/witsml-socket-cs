@@ -10,7 +10,8 @@ Replaces the Node + `ws` TypeScript stub with .NET 9 + ASP.NET Core. Same `ws://
 - **Phase 2 (in):** QuestDB persistence via ILP TCP (writes) + HTTP `/exec` (schema bootstrap). Bounded `Channel<SampleRow>` with `DropOldest` so broadcast hot path never blocks on DB lag. Auto-reconnect on socket failure.
 - **Phase 3 (in):** `GET /api/tiles` endpoint — pre-aggregated `min/max/avg` bins per trace via QuestDB `SAMPLE BY` over Pg-wire (Npgsql). Validates span × res before query.
 - **Retention (in):** `RetentionJob` BackgroundService — drops QuestDB partitions older than `TimeSeries:RetentionDays` (default 7) on startup + every 24h. Safety guard rejects `< 1` (prevents live-data wipe).
-- **Still out:** Timescale alt backend, auth, real WITSML 2.x / ETP.
+- **Auth (in):** static token validated in the HANDSHAKE payload against `Auth:HandshakeToken`. Fail-closed — an unset/empty token rejects every client. Mismatch → `CLOSING` code `UNAUTHORIZED` (close 4401), non-retryable.
+- **Still out:** Timescale alt backend, TLS, real WITSML 2.x / ETP.
 
 ## Run
 
@@ -24,6 +25,8 @@ dotnet run
 ```
 
 WS on `ws://0.0.0.0:8080`. QuestDB web console on `http://localhost:9000`.
+
+**Auth:** clients must send a `token` in the HANDSHAKE payload matching `Auth:HandshakeToken`. Set it in `appsettings.json`, `appsettings.Development.json`, or env `Auth__HandshakeToken`. Unset/empty → fail-closed: every handshake is rejected (`Program.cs` logs a startup warning). `appsettings.Development.json` ships `dev-token` for local runs.
 
 ## Layout
 

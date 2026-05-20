@@ -17,6 +17,7 @@ internal static class Constants
     public const int Port = 8080;
     public const byte ProtocolVersion = 1;
     public const int SupportedSchemaId = 1;
+    public const int UnauthorizedClose = 4401;
     public const int HandshakeTimeoutMs = 5_000;
     public const int IdleTimeoutMs = 15_000;
     public const int PingIntervalMs = 10_000;
@@ -105,6 +106,7 @@ internal sealed class HandshakePayload
     public int schemaId { get; set; }
     public int protocolVersion { get; set; }
     public string? clientId { get; set; }
+    public string? token { get; set; }
 }
 
 internal sealed class WelcomePayload

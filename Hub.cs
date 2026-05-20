@@ -16,11 +16,14 @@ internal sealed class WebSocketHub
     public ConcurrentDictionary<string, ConnectedClient> Clients { get; } = new();
     public ConcurrentDictionary<StreamDef, ConcurrentDictionary<string, ConnectedClient>> StreamSubs { get; } = new();
 
-    public WebSocketHub(ILogger<WebSocketHub> log, AlarmRegistry alarms, RigState state)
+    public string HandshakeToken { get; }
+
+    public WebSocketHub(ILogger<WebSocketHub> log, AlarmRegistry alarms, RigState state, IConfiguration cfg)
     {
         _log = log;
         _alarms = alarms;
         _state = state;
+        HandshakeToken = cfg["Auth:HandshakeToken"] ?? "";
         foreach (StreamDef s in Enum.GetValues<StreamDef>())
             StreamSubs[s] = new();
     }
