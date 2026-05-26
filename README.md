@@ -77,6 +77,17 @@ Tiles.cs        TileResponse DTOs + ResolutionPicker + TilesController (/api/til
 
 ## Smoke test
 
+For frontend Layer 3 tile smoke, seed deterministic 7-day QuestDB history before
+starting the dashboard:
+
+```bash
+scripts/seed-layer3-questdb.py --reset
+```
+
+The script resets only `drill_samples` and `geo_samples`, then writes 30-second
+cadence fixture data via ILP TCP. It is intended for local smoke verification of
+6h / 12h / 24h / 7d `/api/tiles` ranges.
+
 ```js
 import WebSocket from "ws";
 const ws = new WebSocket("ws://localhost:8080/");
