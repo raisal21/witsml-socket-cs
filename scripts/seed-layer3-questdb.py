@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed QuestDB with deterministic 7-day history for frontend Layer 3 smoke.
+"""Seed QuestDB with deterministic 30-day history for frontend Layer 3 smoke.
 
 This fixture is intentionally backend-owned because it mirrors the
 `drill_samples` and `geo_samples` schema used by Persistence.cs and Tiles.cs.
@@ -24,7 +24,7 @@ DEFAULT_HTTP = "http://localhost:9000"
 DEFAULT_ILP = "localhost:9009"
 DEFAULT_SEED = 20260524
 CADENCE_SECONDS = 30
-DAYS = 7
+DAYS = 30
 FUTURE_BUFFER_MINUTES = 30
 PAST_BUFFER_MINUTES = 5
 RECENT_WINDOW_HOURS = 24
@@ -59,19 +59,19 @@ REALISM_CHECKS = [
         "hours": 6,
         "bucket_minutes": 5,
         "min_states": 4,
-        "ranges": {"rpm": 45, "wob": 7, "spp": 45, "rop": 1.0, "gamma": 4},
+        "ranges": {"rpm": 45, "wob": 7, "spp": 45, "flow": 18, "rop": 1.0, "gamma": 4},
     },
     {
         "hours": 12,
         "bucket_minutes": 5,
         "min_states": 5,
-        "ranges": {"rpm": 50, "wob": 8, "spp": 55, "rop": 1.2, "gamma": 6},
+        "ranges": {"rpm": 50, "wob": 8, "spp": 55, "flow": 20, "rop": 1.2, "gamma": 6},
     },
     {
         "hours": 24,
         "bucket_minutes": 60,
         "min_states": 5,
-        "ranges": {"rpm": 35, "wob": 5, "spp": 40, "rop": 0.8, "gamma": 8},
+        "ranges": {"rpm": 35, "wob": 5, "spp": 40, "flow": 16, "rop": 0.8, "gamma": 8},
     },
 ]
 
@@ -101,6 +101,7 @@ class Row:
     torque: float
     hkld: float
     spp: float
+    flow: float
     gamma: float
     rop: float
     h2s: float
@@ -157,7 +158,7 @@ def reset_schema(http: str) -> None:
         """
         CREATE TABLE drill_samples (
           ts TIMESTAMP, seq LONG,
-          depth FLOAT, rpm FLOAT, wob FLOAT, torque FLOAT, hkld FLOAT, spp FLOAT
+          depth FLOAT, rpm FLOAT, wob FLOAT, torque FLOAT, hkld FLOAT, spp FLOAT, flow FLOAT
         ) TIMESTAMP(ts) PARTITION BY DAY WAL
         """,
     )
@@ -411,6 +412,19 @@ def generate_rows(start: datetime, end: datetime, cadence_sec: int, seed: int) -
             hkld = clamp(b.hkld + rng.uniform(-2, 2), 180, 250)
             rop_trace = 0
 
+        if state == "drilling":
+            flow = clamp(1500 + 10 + 9 * pump_cycle + 16 * event + rng.uniform(-4, 4), 1300, 1700)
+        elif state == "slide_survey":
+            flow = clamp(1500 + 5 + 6 * pump_cycle + 8 * event + rng.uniform(-3, 3), 1300, 1700)
+        elif state == "connection":
+            flow = clamp(1500 + rng.uniform(-2, 2), 1300, 1700)
+        elif state in ("circulating", "pumps_reduced"):
+            flow = clamp(1500 - 22 + 8 * pump_cycle + rng.uniform(-5, 5), 1300, 1700)
+        elif state == "off_bottom":
+            flow = clamp(1500 + 16 + 6 * pump_cycle + rng.uniform(-4, 4), 1300, 1700)
+        else:
+            flow = clamp(1500 + rng.uniform(-1, 1), 1300, 1700)
+
         gamma = lithology_gamma(depth, b.gamma_bias, rng)
         h2s = clamp(0.5 + 0.8 * (1 + math.sin(depth / 32.0)) + rng.uniform(0, 0.8), 0, 60)
         if state in ("drilling", "slide_survey") and event > 0.45:
@@ -432,6 +446,7 @@ def generate_rows(start: datetime, end: datetime, cadence_sec: int, seed: int) -
                 torque=torque,
                 hkld=hkld,
                 spp=spp,
+                flow=flow,
                 gamma=gamma,
                 rop=rop_trace,
                 h2s=h2s,
@@ -459,7 +474,7 @@ def ilp_lines(rows: Iterable[Row]) -> Iterable[str]:
         yield (
             f"drill_samples seq={r.seq}i"
             f",depth={f(r.depth)},rpm={f(r.rpm)},wob={f(r.wob)},torque={f(r.torque)}"
-            f",hkld={f(r.hkld)},spp={f(r.spp)} {tns}\n"
+            f",hkld={f(r.hkld)},spp={f(r.spp)},flow={f(r.flow)} {tns}\n"
         )
         yield (
             f"geo_samples seq={r.seq}i"
@@ -609,7 +624,7 @@ def main() -> int:
         print(f"  drill_samples   : {drill[2]} rows - {drill[0]} -> {drill[1]}")
     if geo:
         print(f"  geo_samples     : {geo[2]} rows - {geo[0]} -> {geo[1]}")
-    print("\nNext: run realtime-monitoring/scripts/smoke-test.sh and smoke 6h/12h/24h/7d presets.")
+    print("\nNext: run realtime-monitoring/scripts/smoke-test.sh and smoke 6h/12h/24h/7d presets plus manual 30d ranges.")
     return 0
 
 

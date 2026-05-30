@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -15,14 +16,24 @@ internal sealed class WebSocketHub
 
     public ConcurrentDictionary<string, ConnectedClient> Clients { get; } = new();
     public ConcurrentDictionary<StreamDef, ConcurrentDictionary<string, ConnectedClient>> StreamSubs { get; } = new();
+    public TileQueryService Tiles { get; }
+    public HistoryExtentService HistoryExtents { get; }
 
     public string HandshakeToken { get; }
 
-    public WebSocketHub(ILogger<WebSocketHub> log, AlarmRegistry alarms, RigState state, IConfiguration cfg)
+    public WebSocketHub(
+        ILogger<WebSocketHub> log,
+        AlarmRegistry alarms,
+        RigState state,
+        IConfiguration cfg,
+        TileQueryService tiles,
+        HistoryExtentService historyExtents)
     {
         _log = log;
         _alarms = alarms;
         _state = state;
+        Tiles = tiles;
+        HistoryExtents = historyExtents;
         HandshakeToken = cfg["Auth:HandshakeToken"] ?? "";
         foreach (StreamDef s in Enum.GetValues<StreamDef>())
             StreamSubs[s] = new();
@@ -74,6 +85,7 @@ internal sealed class WebSocketHub
 
             foreach (var s in client.Subscriptions)
                 StreamSubs[s].TryRemove(clientId, out _);
+            client.TileSubscriptions.Clear();
             Clients.TryRemove(clientId, out _);
             client.HandshakeTimer?.Dispose();
             client.SendGate.Dispose();
@@ -200,6 +212,9 @@ internal sealed class WebSocketHub
 
     public ValueTask SendErrorAsync(ConnectedClient client, string code, string message)
         => SendJsonAsync<object>(client, "ERROR", null, new ErrorPayload { code = code, message = message });
+
+    public ValueTask SendBinaryAsync(ConnectedClient client, ReadOnlyMemory<byte> payload)
+        => EnqueueAsync(client, new OutboundFrame(true, payload));
 
     public async Task CloseAsync(ConnectedClient client, string code, int closeCode, string reason, bool retryable)
     {
@@ -330,4 +345,53 @@ internal static class FrameWriter
         BinaryPrimitives.WriteSingleBigEndian(dst[32..], s.Inc);
         BinaryPrimitives.WriteSingleBigEndian(dst[36..], s.Azi);
     }
+
+    public static byte[] WriteTile(
+        TileFrameType frameType,
+        TileSubscription sub,
+        TileStream stream,
+        TileResponse response,
+        long fromUnixMs,
+        long toUnixMs,
+        long replaceFromUnixMs)
+    {
+        var traces = TileQueryService.TraceOrder(stream);
+        var binSize = sizeof(long) + traces.Length * 3 * sizeof(float);
+        var bytes = new byte[Constants.TileHeaderBytes + response.bins.Count * binSize];
+        var dst = bytes.AsSpan();
+
+        dst[0] = (byte)frameType;
+        dst[1] = Constants.ProtocolVersion;
+        dst[2] = 0; dst[3] = 0;
+        BinaryPrimitives.WriteUInt32BigEndian(dst[4..], sub.SubscriptionId);
+        dst[8] = (byte)stream;
+        dst[9] = (byte)ResolutionPicker.ToCode(sub.Res);
+        BinaryPrimitives.WriteUInt16BigEndian(dst[10..], Constants.TileTraceMask(stream));
+        BinaryPrimitives.WriteInt64BigEndian(dst[12..], fromUnixMs);
+        BinaryPrimitives.WriteInt64BigEndian(dst[20..], toUnixMs);
+        BinaryPrimitives.WriteInt64BigEndian(dst[28..], replaceFromUnixMs);
+        BinaryPrimitives.WriteUInt32BigEndian(dst[36..], (uint)response.bins.Count);
+
+        var offset = Constants.TileHeaderBytes;
+        foreach (var bin in response.bins)
+        {
+            var ts = DateTimeOffset.Parse(bin.ts, CultureInfo.InvariantCulture).ToUnixTimeMilliseconds();
+            BinaryPrimitives.WriteInt64BigEndian(dst[offset..], ts);
+            offset += sizeof(long);
+
+            foreach (var trace in traces)
+            {
+                var stat = bin.Traces.TryGetValue(trace, out var value) ? value as TileStat : null;
+                WriteStat(dst[offset..], stat?.min);
+                WriteStat(dst[(offset + sizeof(float))..], stat?.max);
+                WriteStat(dst[(offset + 2 * sizeof(float))..], stat?.avg);
+                offset += 3 * sizeof(float);
+            }
+        }
+
+        return bytes;
+    }
+
+    private static void WriteStat(Span<byte> dst, double? value)
+        => BinaryPrimitives.WriteSingleBigEndian(dst, value is null ? float.NaN : (float)value.Value);
 }

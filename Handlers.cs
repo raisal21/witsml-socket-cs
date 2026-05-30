@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Npgsql;
 
 namespace WitsmlSocket;
 
@@ -11,6 +12,10 @@ internal static class Handlers
             "HANDSHAKE"   => HandleHandshakeAsync(hub, client, msg.payload),
             "SUBSCRIBE"   => HandleSubscribeAsync(hub, client, msg.payload),
             "UNSUBSCRIBE" => HandleUnsubscribeAsync(hub, client, msg.payload),
+            "TILE_SUBSCRIBE" => HandleTileSubscribeAsync(hub, client, msg.payload),
+            "TILE_UNSUBSCRIBE" => HandleTileUnsubscribeAsync(hub, client, msg.payload),
+            "TILE_RANGE_REQUEST" => HandleTileRangeRequestAsync(hub, client, msg.payload),
+            "HISTORY_EXTENT_REQUEST" => HandleHistoryExtentRequestAsync(hub, client, msg.payload),
             "ALARM_ACK"   => HandleAlarmAckAsync(hub, client, msg.payload, alarms),
             "HEARTBEAT"   => Task.CompletedTask,
             _             => HandleUnknownAsync(hub, client, msg.messageType ?? ""),
@@ -142,6 +147,286 @@ internal static class Handlers
             removed = [.. removed],
             notFound = [.. notFound],
             currentSubscriptions = client.Subscriptions.Select(s => (int)s).ToArray(),
+        });
+    }
+
+    private static async Task HandleHistoryExtentRequestAsync(WebSocketHub hub, ConnectedClient client, JsonElement payload)
+    {
+        if (client.State != ClientState.Active && client.State != ClientState.Idle)
+        {
+            await hub.SendErrorAsync(client, "INVALID_STATE", "Client must be ACTIVE or IDLE to request history extents");
+            return;
+        }
+
+        HistoryExtentRequestPayload? request;
+        try { request = payload.Deserialize<HistoryExtentRequestPayload>(JsonOpts.Default); } catch { request = null; }
+        if (request is null)
+        {
+            await hub.SendErrorAsync(client, "INVALID_PAYLOAD", "wellId and streams are required");
+            return;
+        }
+
+        var acceptedStreams = new List<TileStream>();
+        var rejected = new List<string>();
+        var requestedStreams = request.streams.Length == 0 ? ["drill", "geo"] : request.streams;
+        foreach (var raw in requestedStreams.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (TileQueryService.TryParseStream(raw, out var stream))
+                acceptedStreams.Add(stream);
+            else
+                rejected.Add(raw);
+        }
+
+        if (acceptedStreams.Count == 0)
+        {
+            await hub.SendErrorAsync(client, "INVALID_HISTORY_STREAM", "streams must include drill or geo");
+            return;
+        }
+        if (rejected.Count > 0)
+        {
+            await hub.SendErrorAsync(client, "INVALID_HISTORY_STREAM", $"unsupported streams: {string.Join(", ", rejected)}");
+            return;
+        }
+
+        try
+        {
+            var response = await hub.HistoryExtents.QueryAsync(request.wellId, [.. acceptedStreams], CancellationToken.None);
+            await hub.SendJsonAsync(client, "HISTORY_EXTENT", response);
+        }
+        catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+        {
+            await hub.SendErrorAsync(client, "HISTORY_EXTENT_FAILED", "History extent query failed");
+        }
+    }
+
+    private static async Task HandleTileSubscribeAsync(WebSocketHub hub, ConnectedClient client, JsonElement payload)
+    {
+        if (client.State != ClientState.Active && client.State != ClientState.Idle)
+        {
+            await hub.SendErrorAsync(client, "INVALID_STATE", "Client must be ACTIVE or IDLE to subscribe to tiles");
+            return;
+        }
+
+        TileSubscribePayload? tp;
+        try { tp = payload.Deserialize<TileSubscribePayload>(JsonOpts.Default); } catch { tp = null; }
+        if (tp is null || tp.subscriptionId == 0)
+        {
+            await hub.SendErrorAsync(client, "INVALID_PAYLOAD", "subscriptionId must be a non-zero uint");
+            return;
+        }
+
+        if (client.TileSubscriptions.ContainsKey(tp.subscriptionId))
+        {
+            await hub.SendErrorAsync(client, "DUPLICATE_TILE_SUBSCRIPTION", $"Tile subscription {tp.subscriptionId} is already active");
+            return;
+        }
+
+        if (!ResolutionPicker.TryGet(tp.res, out var bucket) ||
+            !TileQueryService.IsValidLiveCombo(tp.spanMinutes, tp.res, out var cadenceMs))
+        {
+            await hub.SendErrorAsync(client, "INVALID_TILE_RANGE", "spanMinutes/res must be 6h or 12h at 5m, or 24h/3d/7d at 1h");
+            return;
+        }
+
+        var acceptedStreams = new List<TileStream>();
+        var rejected = new List<string>();
+        foreach (var raw in tp.streams.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (TileQueryService.TryParseStream(raw, out var stream))
+                acceptedStreams.Add(stream);
+            else
+                rejected.Add(raw);
+        }
+
+        if (acceptedStreams.Count == 0)
+        {
+            await hub.SendJsonAsync(client, "TILE_SUBSCRIBE_ACK", new TileSubscribeAckPayload
+            {
+                subscriptionId = tp.subscriptionId,
+                accepted = [],
+                rejected = [.. rejected],
+                spanMinutes = tp.spanMinutes,
+                res = tp.res,
+                cadenceMs = cadenceMs,
+            });
+            await hub.SendErrorAsync(client, "INVALID_TILE_STREAM", "streams must include drill or geo");
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var from = now.AddMinutes(-tp.spanMinutes);
+        var snapshots = new List<(TileStream Stream, TileResponse Response)>();
+        var queryAccepted = new List<TileStream>();
+        var snapshotFailures = new List<string>();
+        foreach (var stream in acceptedStreams)
+        {
+            try
+            {
+                var response = await hub.Tiles.QueryAsync(stream, from, now, tp.res, CancellationToken.None);
+                snapshots.Add((stream, response));
+                queryAccepted.Add(stream);
+            }
+            catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+            {
+                var streamName = TileQueryService.StreamName(stream);
+                rejected.Add(streamName);
+                snapshotFailures.Add(streamName);
+            }
+        }
+
+        var sub = new TileSubscription
+        {
+            SubscriptionId = tp.subscriptionId,
+            SpanMinutes = tp.spanMinutes,
+            Res = tp.res,
+            Bucket = bucket,
+            CadenceMs = cadenceMs,
+            Streams = [.. queryAccepted],
+            NextDueUnixMs = now.ToUnixTimeMilliseconds() + cadenceMs,
+        };
+
+        if (queryAccepted.Count > 0 && !client.TileSubscriptions.TryAdd(tp.subscriptionId, sub))
+        {
+            await hub.SendErrorAsync(client, "DUPLICATE_TILE_SUBSCRIPTION", $"Tile subscription {tp.subscriptionId} is already active");
+            return;
+        }
+
+        await hub.SendJsonAsync(client, "TILE_SUBSCRIBE_ACK", new TileSubscribeAckPayload
+        {
+            subscriptionId = tp.subscriptionId,
+            accepted = queryAccepted.Select(TileQueryService.StreamName).ToArray(),
+            rejected = [.. rejected],
+            spanMinutes = tp.spanMinutes,
+            res = tp.res,
+            cadenceMs = cadenceMs,
+        });
+
+        if (queryAccepted.Count == 0)
+        {
+            await hub.SendErrorAsync(client, "TILE_SNAPSHOT_FAILED", "History store is unavailable");
+            return;
+        }
+        if (snapshotFailures.Count > 0)
+        {
+            await hub.SendErrorAsync(client, "TILE_SNAPSHOT_FAILED", $"History snapshot failed for: {string.Join(", ", snapshotFailures)}");
+        }
+
+        var fromMs = from.ToUnixTimeMilliseconds();
+        var toMs = now.ToUnixTimeMilliseconds();
+        foreach (var (stream, response) in snapshots)
+        {
+            var bytes = FrameWriter.WriteTile(TileFrameType.Snapshot, sub, stream, response, fromMs, toMs, fromMs);
+            await hub.SendBinaryAsync(client, bytes);
+        }
+    }
+
+    private static async Task HandleTileRangeRequestAsync(WebSocketHub hub, ConnectedClient client, JsonElement payload)
+    {
+        if (client.State != ClientState.Active && client.State != ClientState.Idle)
+        {
+            await hub.SendErrorAsync(client, "INVALID_STATE", "Client must be ACTIVE or IDLE to request tile ranges");
+            return;
+        }
+
+        TileRangeRequestPayload? tp;
+        try { tp = payload.Deserialize<TileRangeRequestPayload>(JsonOpts.Default); } catch { tp = null; }
+        var subscriptionId = tp?.subscriptionId is > 0 ? tp.subscriptionId : (tp?.requestId ?? 0);
+        if (tp is null || subscriptionId == 0)
+        {
+            await hub.SendErrorAsync(client, "INVALID_PAYLOAD", "subscriptionId or requestId must be a non-zero uint");
+            return;
+        }
+
+        DateTimeOffset from;
+        DateTimeOffset to;
+        try
+        {
+            from = DateTimeOffset.FromUnixTimeMilliseconds(tp.fromUnixMs);
+            to = DateTimeOffset.FromUnixTimeMilliseconds(tp.toUnixMs);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            await hub.SendErrorAsync(client, "INVALID_TILE_RANGE", "fromUnixMs/toUnixMs must be valid epoch milliseconds");
+            return;
+        }
+
+        if (to <= from)
+        {
+            await hub.SendErrorAsync(client, "INVALID_TILE_RANGE", "toUnixMs must be greater than fromUnixMs");
+            return;
+        }
+
+        if (!ResolutionPicker.TryGet(tp.res, out var bucket) ||
+            !ResolutionPicker.ValidateSpan(tp.res, to - from, out _))
+        {
+            await hub.SendErrorAsync(client, "INVALID_TILE_RANGE", "manual range is too wide for the requested resolution");
+            return;
+        }
+
+        var acceptedStreams = new List<TileStream>();
+        var rejected = new List<string>();
+        foreach (var raw in tp.streams.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (TileQueryService.TryParseStream(raw, out var stream))
+                acceptedStreams.Add(stream);
+            else
+                rejected.Add(raw);
+        }
+
+        if (acceptedStreams.Count == 0 || rejected.Count > 0)
+        {
+            await hub.SendErrorAsync(client, "INVALID_TILE_STREAM", "streams must include only drill and/or geo");
+            return;
+        }
+
+        var sub = new TileSubscription
+        {
+            SubscriptionId = subscriptionId,
+            SpanMinutes = (int)Math.Ceiling((to - from).TotalMinutes),
+            Res = tp.res,
+            Bucket = bucket,
+            CadenceMs = 0,
+            Streams = [.. acceptedStreams],
+            NextDueUnixMs = 0,
+        };
+
+        try
+        {
+            foreach (var stream in acceptedStreams)
+            {
+                var response = await hub.Tiles.QueryAsync(stream, from, to, tp.res, CancellationToken.None);
+                var bytes = FrameWriter.WriteTile(
+                    TileFrameType.Snapshot,
+                    sub,
+                    stream,
+                    response,
+                    tp.fromUnixMs,
+                    tp.toUnixMs,
+                    tp.fromUnixMs);
+                await hub.SendBinaryAsync(client, bytes);
+            }
+        }
+        catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+        {
+            await hub.SendErrorAsync(client, "TILE_RANGE_FAILED", "History range query failed");
+        }
+    }
+
+    private static async Task HandleTileUnsubscribeAsync(WebSocketHub hub, ConnectedClient client, JsonElement payload)
+    {
+        TileUnsubscribePayload? tp;
+        try { tp = payload.Deserialize<TileUnsubscribePayload>(JsonOpts.Default); } catch { tp = null; }
+        if (tp is null || tp.subscriptionId == 0)
+        {
+            await hub.SendErrorAsync(client, "INVALID_PAYLOAD", "subscriptionId must be a non-zero uint");
+            return;
+        }
+
+        var removed = client.TileSubscriptions.TryRemove(tp.subscriptionId, out _);
+        await hub.SendJsonAsync(client, "TILE_UNSUBSCRIBE_ACK", new TileUnsubscribeAckPayload
+        {
+            subscriptionId = tp.subscriptionId,
+            removed = removed,
         });
     }
 

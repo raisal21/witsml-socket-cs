@@ -15,6 +15,8 @@ builder.Logging.AddSimpleConsole(o =>
 
 builder.Services.AddSingleton<RigState>();
 builder.Services.AddSingleton<AlarmRegistry>();
+builder.Services.AddSingleton<TileQueryService>();
+builder.Services.AddSingleton<HistoryExtentService>();
 builder.Services.AddSingleton<WebSocketHub>();
 
 // Persistence channel — bounded, DropOldest so DB lag never blocks broadcast.
@@ -32,6 +34,7 @@ builder.Services.AddHostedService<PingService>();
 builder.Services.AddHostedService<AlarmPurgeService>();
 builder.Services.AddHostedService<PersistenceService>();
 builder.Services.AddHostedService<RetentionJob>();
+builder.Services.AddHostedService<TileUpdateService>();
 
 var app = builder.Build();
 

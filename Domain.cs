@@ -108,6 +108,7 @@ internal sealed class ConnectedClient
     public ClientState State;
     public long LastActivityUtc;
     public HashSet<StreamDef> Subscriptions { get; } = [];
+    public ConcurrentDictionary<uint, TileSubscription> TileSubscriptions { get; } = new();
     public long? SlowSinceUtc;
     public int DroppedFrames;
     public CancellationTokenSource? HandshakeTimer;
@@ -116,3 +117,15 @@ internal sealed class ConnectedClient
 }
 
 internal readonly record struct OutboundFrame(bool IsBinary, ReadOnlyMemory<byte> Payload);
+
+internal sealed class TileSubscription
+{
+    public required uint SubscriptionId { get; init; }
+    public required int SpanMinutes { get; init; }
+    public required string Res { get; init; }
+    public required TimeSpan Bucket { get; init; }
+    public required int CadenceMs { get; init; }
+    public required TileStream[] Streams { get; init; }
+    public long NextDueUnixMs { get; set; }
+    public long LastUpdateErrorUnixMs { get; set; }
+}

@@ -22,3 +22,5 @@ LEARN.md
 LEARN.html
 LEARN_ID.md
 LEARN_ID.html
+
+__pycache__/

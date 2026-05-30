@@ -30,6 +30,20 @@ internal static class Constants
     public static readonly TimeSpan AlarmRetention = TimeSpan.FromHours(24);
     public const int DrillFrameBytes = 44;
     public const int GeoFrameBytes = 40;
+    public const int TileHeaderBytes = 40;
+    public const ushort DrillTileTraceMask = 0x007f;
+    public const ushort GeoTileTraceMask = 0x003f;
+    public const int TileShortCadenceMs = 5_000;
+    public const int TileLongCadenceMs = 30_000;
+    public const int TileUpdateTickMs = 1_000;
+    public const int TileUpdateErrorThrottleMs = 60_000;
+
+    public static ushort TileTraceMask(TileStream stream) => stream switch
+    {
+        TileStream.Drill => DrillTileTraceMask,
+        TileStream.Geo => GeoTileTraceMask,
+        _ => throw new ArgumentOutOfRangeException(nameof(stream), stream, "unknown tile stream"),
+    };
 }
 
 internal enum ClientState
@@ -46,6 +60,28 @@ internal enum StreamDef
 {
     Drill = 101,
     Geo = 102,
+}
+
+internal enum TileFrameType : byte
+{
+    Snapshot = 201,
+    Update = 202,
+}
+
+internal enum TileStream : byte
+{
+    Drill = 1,
+    Geo = 2,
+}
+
+internal enum TileResCode : byte
+{
+    OneSecond = 1,
+    TenSeconds = 2,
+    OneMinute = 3,
+    FiveMinutes = 4,
+    OneHour = 5,
+    SixHours = 6,
 }
 
 internal enum AlarmSeverity
@@ -136,6 +172,83 @@ internal sealed class UnsubscribeAckPayload
     public int[] currentSubscriptions { get; set; } = [];
 }
 
+internal sealed class TileSubscribePayload
+{
+    public uint subscriptionId { get; set; }
+    public int spanMinutes { get; set; }
+    public string res { get; set; } = "";
+    public string[] streams { get; set; } = [];
+}
+
+internal sealed class TileUnsubscribePayload
+{
+    public uint subscriptionId { get; set; }
+}
+
+internal sealed class TileRangeRequestPayload
+{
+    public uint requestId { get; set; }
+    public uint subscriptionId { get; set; }
+    public long fromUnixMs { get; set; }
+    public long toUnixMs { get; set; }
+    public string res { get; set; } = "";
+    public string[] streams { get; set; } = [];
+}
+
+internal sealed class TileSubscribeAckPayload
+{
+    public uint subscriptionId { get; set; }
+    public string[] accepted { get; set; } = [];
+    public string[] rejected { get; set; } = [];
+    public int spanMinutes { get; set; }
+    public string res { get; set; } = "";
+    public int cadenceMs { get; set; }
+}
+
+internal sealed class TileUnsubscribeAckPayload
+{
+    public uint subscriptionId { get; set; }
+    public bool removed { get; set; }
+}
+
+internal sealed class HistoryExtentRequestPayload
+{
+    public string wellId { get; set; } = "ga-01";
+    public string[] streams { get; set; } = [];
+}
+
+internal sealed class HistoryExtentPayload
+{
+    public string wellId { get; set; } = "ga-01";
+    public Dictionary<string, HistoryStreamExtentPayload> streams { get; set; } = [];
+    public HistorySharedExtentPayload shared { get; set; } = new();
+    public string[] warnings { get; set; } = [];
+}
+
+internal class HistoryExtentPayloadBase
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public long? minTimeMs { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public long? maxTimeMs { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public double? minDepth { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public double? maxDepth { get; set; }
+}
+
+internal sealed class HistoryStreamExtentPayload : HistoryExtentPayloadBase;
+
+internal sealed class HistorySharedExtentPayload : HistoryExtentPayloadBase
+{
+    public string timeMode { get; set; } = "empty";
+    public string depthSource { get; set; } = "none";
+    public string? warning { get; set; }
+}
+
 internal sealed class AlarmAckPayload
 {
     public string alarmId { get; set; } = "";
@@ -175,4 +288,3 @@ internal sealed class ClosingPayload
     public int? retryAfterMs { get; set; }
     public int closeCode { get; set; }
 }
-

@@ -14,7 +14,7 @@ internal abstract record SampleRow(long TimestampUnixMs, uint Seq);
 
 internal sealed record DrillSampleRow(
     long TimestampUnixMs, uint Seq,
-    float Depth, float Rpm, float Wob, float Torque, float Hkld, float Spp
+    float Depth, float Rpm, float Wob, float Torque, float Hkld, float Spp, float Flow
 ) : SampleRow(TimestampUnixMs, Seq);
 
 internal sealed record GeoSampleRow(
@@ -100,7 +100,7 @@ internal sealed class QuestDbStore : ITimeSeriesStore, IAsyncDisposable
             """
             CREATE TABLE IF NOT EXISTS drill_samples (
               ts TIMESTAMP, seq LONG,
-              depth FLOAT, rpm FLOAT, wob FLOAT, torque FLOAT, hkld FLOAT, spp FLOAT
+              depth FLOAT, rpm FLOAT, wob FLOAT, torque FLOAT, hkld FLOAT, spp FLOAT, flow FLOAT
             ) TIMESTAMP(ts) PARTITION BY DAY WAL;
             """,
             """
@@ -127,6 +127,7 @@ internal sealed class QuestDbStore : ITimeSeriesStore, IAsyncDisposable
                 throw new InvalidOperationException($"QuestDB schema bootstrap failed: {res.StatusCode} {body}");
             }
         }
+        await EnsureOptionalColumnAsync(http, "ALTER TABLE drill_samples ADD COLUMN flow FLOAT", ct);
         _log.LogInformation("[QUESTDB] Schema ready");
     }
 
@@ -191,7 +192,22 @@ internal sealed class QuestDbStore : ITimeSeriesStore, IAsyncDisposable
         AppendField(sb, ",torque=", r.Torque);
         AppendField(sb, ",hkld=",  r.Hkld);
         AppendField(sb, ",spp=",   r.Spp);
+        AppendField(sb, ",flow=",  r.Flow);
         sb.Append(' ').Append(ns).Append('\n');
+    }
+
+    private async Task EnsureOptionalColumnAsync(HttpClient http, string sql, CancellationToken ct)
+    {
+        var url = $"/exec?query={Uri.EscapeDataString(sql)}";
+        using var res = await http.GetAsync(url, ct);
+        var body = await res.Content.ReadAsStringAsync(ct);
+        if (res.IsSuccessStatusCode) return;
+        if (body.Contains("already exists", StringComparison.OrdinalIgnoreCase) ||
+            body.Contains("duplicate", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+        throw new InvalidOperationException($"QuestDB schema migration failed: {res.StatusCode} {body}");
     }
 
     private static void AppendGeo(StringBuilder sb, GeoSampleRow r)
@@ -323,7 +339,7 @@ internal sealed class RetentionJob(
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        var days = cfg.GetValue("TimeSeries:RetentionDays", 7);
+        var days = cfg.GetValue("TimeSeries:RetentionDays", 31);
         if (days < 1)
         {
             log.LogWarning("[RETENTION] disabled — RetentionDays={Days} (<1)", days);

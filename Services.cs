@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Threading.Channels;
+using Npgsql;
 
 namespace WitsmlSocket;
 
@@ -38,7 +39,7 @@ internal sealed class TelemetryService(
                 hub.BroadcastBinary(StreamDef.Drill, drill.AsSpan(0, Constants.DrillFrameBytes));
                 Enqueue(new DrillSampleRow(
                     state.TimestampUnixMs, drillSeq,
-                    state.Depth, state.Rpm, state.Wob, state.Torque, state.Hkld, state.Spp));
+                    state.Depth, state.Rpm, state.Wob, state.Torque, state.Hkld, state.Spp, state.Flow));
 
                 if (_tick % Constants.GeoTickRatio == 0)
                 {
@@ -126,6 +127,68 @@ internal sealed class PingService(WebSocketHub hub, ILogger<PingService> log) : 
             }
         }
         catch (OperationCanceledException) { }
+    }
+}
+
+internal sealed class TileUpdateService(
+    WebSocketHub hub,
+    ILogger<TileUpdateService> log) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(Constants.TileUpdateTickMs));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+                await SendDueUpdatesAsync(ct);
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task SendDueUpdatesAsync(CancellationToken ct)
+    {
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var (_, client) in hub.Clients)
+        {
+            if (client.State != ClientState.Active && client.State != ClientState.Idle) continue;
+            foreach (var (_, sub) in client.TileSubscriptions)
+            {
+                if (nowMs < sub.NextDueUnixMs) continue;
+                sub.NextDueUnixMs = nowMs + sub.CadenceMs;
+                await SendSubscriptionUpdateAsync(client, sub, nowMs, ct);
+            }
+        }
+    }
+
+    private async Task SendSubscriptionUpdateAsync(ConnectedClient client, TileSubscription sub, long nowMs, CancellationToken ct)
+    {
+        var bucketMs = (long)sub.Bucket.TotalMilliseconds;
+        var fromMs = nowMs - sub.SpanMinutes * 60_000L;
+        var replaceFromMs = Math.Max(fromMs, (nowMs / bucketMs) * bucketMs - bucketMs);
+        var queryFrom = DateTimeOffset.FromUnixTimeMilliseconds(replaceFromMs);
+        var queryTo = DateTimeOffset.FromUnixTimeMilliseconds(nowMs);
+
+        foreach (var stream in sub.Streams)
+        {
+            try
+            {
+                var response = await hub.Tiles.QueryAsync(stream, queryFrom, queryTo, sub.Res, ct);
+                var bytes = FrameWriter.WriteTile(TileFrameType.Update, sub, stream, response, fromMs, nowMs, replaceFromMs);
+                await hub.SendBinaryAsync(client, bytes);
+            }
+            catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+            {
+                log.LogWarning(ex, "[TILES] update failed subscription={Sub} client={Client}", sub.SubscriptionId, client.ClientId);
+                await SendThrottledErrorAsync(client, sub, nowMs);
+            }
+        }
+    }
+
+    private async Task SendThrottledErrorAsync(ConnectedClient client, TileSubscription sub, long nowMs)
+    {
+        if (nowMs - sub.LastUpdateErrorUnixMs < Constants.TileUpdateErrorThrottleMs) return;
+        sub.LastUpdateErrorUnixMs = nowMs;
+        await hub.SendErrorAsync(client, "TILE_UPDATE_FAILED", "History update failed; subscription remains active");
     }
 }
 
