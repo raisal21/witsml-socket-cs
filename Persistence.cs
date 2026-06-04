@@ -6,10 +6,6 @@ using System.Threading.Channels;
 
 namespace WitsmlSocket;
 
-// =============================================================================
-// Sample rows (write DTOs)
-// =============================================================================
-
 internal abstract record SampleRow(long TimestampUnixMs, uint Seq);
 
 internal sealed record DrillSampleRow(
@@ -22,10 +18,6 @@ internal sealed record GeoSampleRow(
     float Depth, float Gamma, float Rop, float H2s, float Inc, float Azi
 ) : SampleRow(TimestampUnixMs, Seq);
 
-// =============================================================================
-// Store interface
-// =============================================================================
-
 internal interface ITimeSeriesStore
 {
     Task EnsureSchemaAsync(CancellationToken ct);
@@ -34,7 +26,7 @@ internal interface ITimeSeriesStore
 }
 
 // =============================================================================
-// QuestDB store — ILP TCP for writes, HTTP /exec for schema bootstrap
+// QuestDB store — ILP TCP keeps hot writes cheap; HTTP /exec handles bootstrap.
 // =============================================================================
 
 internal sealed class QuestDbStore : ITimeSeriesStore, IAsyncDisposable
@@ -79,7 +71,8 @@ internal sealed class QuestDbStore : ITimeSeriesStore, IAsyncDisposable
 
             if (!res.IsSuccessStatusCode)
             {
-                // QuestDB returns 400 with "could not remove partition" when no partition matches — treat as no-op
+                // QuestDB reports an absent partition as HTTP 400, so retention
+                // treats that response as idempotent success.
                 if (body.Contains("could not remove", StringComparison.OrdinalIgnoreCase) ||
                     body.Contains("no partitions", StringComparison.OrdinalIgnoreCase))
                 {
@@ -180,8 +173,8 @@ internal sealed class QuestDbStore : ITimeSeriesStore, IAsyncDisposable
         _log.LogInformation("[QUESTDB] ILP TCP connected {Host}:{Port}", _ilpHost, _ilpPort);
     }
 
-    // ILP line protocol: `table field1=v1,field2=v2 timestamp_ns\n`
-    // float fields = bare numeric; int fields suffix `i`. Designated TIMESTAMP at end in ns.
+    // QuestDB ILP requires the designated timestamp last in nanoseconds; integer
+    // fields need the `i` suffix while floats stay bare.
     private static void AppendDrill(StringBuilder sb, DrillSampleRow r)
     {
         var ns = r.TimestampUnixMs * 1_000_000L;
@@ -245,7 +238,7 @@ internal sealed class QuestDbStore : ITimeSeriesStore, IAsyncDisposable
 }
 
 // =============================================================================
-// Persistence service — drains bounded channel into store in batches
+// Persistence service — batches writes so telemetry ticks stay cheap.
 // =============================================================================
 
 internal sealed class PersistenceService(
@@ -258,7 +251,8 @@ internal sealed class PersistenceService(
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        // Bootstrap schema with a few retries — QuestDB may not be up yet at host start
+        // QuestDB can start after the host, so schema bootstrap waits before the
+        // persistence loop begins dropping failed writes.
         await BootstrapSchemaAsync(ct);
 
         var batch = new List<SampleRow>(BatchSize);
@@ -299,7 +293,7 @@ internal sealed class PersistenceService(
             }
         }
 
-        // Drain on shutdown — best effort
+        // Shutdown drain is best-effort; host shutdown must not hang on QuestDB.
         while (reader.TryRead(out var row)) batch.Add(row);
         if (batch.Count > 0)
         {
@@ -329,7 +323,7 @@ internal sealed class PersistenceService(
 }
 
 // =============================================================================
-// Retention job — drops partitions older than RetentionDays, daily
+// Retention job — keeps local history inside the configured demo horizon.
 // =============================================================================
 
 internal sealed class RetentionJob(
@@ -346,7 +340,7 @@ internal sealed class RetentionJob(
             return;
         }
 
-        // Initial settle delay so QuestDB and schema bootstrap finish first
+        // Retention runs after the bootstrap window to avoid racing table creation.
         try { await Task.Delay(TimeSpan.FromSeconds(15), ct); }
         catch (OperationCanceledException) { return; }
 

@@ -51,7 +51,7 @@ internal sealed class AlarmRegistry
 
     public Alarm? Raise(string code, string message, AlarmSeverity severity)
     {
-        // dedupe by business code
+        // An alarm code stays active until ACK so repeated ticks do not spam clients.
         if (!_activeCodes.TryAdd(code, 0)) return null;
 
         var id = $"ALM-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{Interlocked.Increment(ref _sequence)}";

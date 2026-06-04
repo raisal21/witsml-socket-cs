@@ -57,7 +57,7 @@ internal sealed class TelemetryService(
                 MaybeRaiseAlarm();
                 _tick++;
 
-                // Log persistence drops every 600 ticks (~60s @ 10Hz) — never block the broadcast hot path
+                // Drop logging is windowed so DB outages stay visible without per-tick noise.
                 if (_tick % 600 == 0 && _persistDrops > 0)
                 {
                     log.LogWarning("[PERSIST] dropped {N} samples in last window", _persistDrops);
@@ -76,7 +76,7 @@ internal sealed class TelemetryService(
 
     private void Enqueue(SampleRow row)
     {
-        // Non-blocking. On overflow, bounded channel drops oldest — broadcast never blocked.
+        // Persistence is best-effort; telemetry broadcast must never wait on QuestDB.
         if (!persistence.TryWrite(row)) _persistDrops++;
     }
 

@@ -194,9 +194,6 @@ internal sealed class WebSocketHub
         catch (WebSocketException) { }
     }
 
-    // =============================================================================
-    // Send helpers
-    // =============================================================================
     public ValueTask SendJsonAsync<T>(ConnectedClient client, string messageType, T? payload, ErrorPayload? error = null)
     {
         var envelope = new ServerMessage<T>
@@ -235,8 +232,8 @@ internal sealed class WebSocketHub
         lock (client.StateLock)
             StateMachine.TryTransition(ref client.State, ClientState.Closing);
 
-        // Send CLOSING then close under SendGate — the gate is shared with the send
-        // loop, so the CLOSING frame is flushed before the close handshake (no race).
+        // Hold SendGate across CLOSING and close so clients can read the reason
+        // before the close handshake wins the race.
         await client.SendGate.WaitAsync();
         try
         {
@@ -272,9 +269,6 @@ internal sealed class WebSocketHub
         }
     }
 
-    // =============================================================================
-    // Broadcast
-    // =============================================================================
     public void BroadcastBinary(StreamDef stream, ReadOnlySpan<byte> frame)
     {
         var subs = StreamSubs[stream];

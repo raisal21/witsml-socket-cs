@@ -4,10 +4,6 @@ using Npgsql;
 
 namespace WitsmlSocket;
 
-// =============================================================================
-// DTOs
-// =============================================================================
-
 internal sealed class TileResponse
 {
     public string stream { get; set; } = "";
@@ -33,7 +29,7 @@ internal sealed class TileStat
 }
 
 // =============================================================================
-// Resolution picker — validates span × res combo, rejects oversized bin counts
+// Resolution picker — protects the tile payload budget before querying QuestDB.
 // =============================================================================
 
 internal static class ResolutionPicker
@@ -48,7 +44,7 @@ internal static class ResolutionPicker
         ["6h"]  = TimeSpan.FromHours(6),
     };
 
-    // Max span per resolution — keeps payload bounded (~120-168 bins)
+    // Span caps keep every accepted resolution inside the bounded tile budget.
     private static readonly Dictionary<string, TimeSpan> MaxSpan = new()
     {
         ["1s"]  = TimeSpan.FromMinutes(2),
@@ -94,7 +90,7 @@ internal static class ResolutionPicker
 }
 
 // =============================================================================
-// Query service + endpoint
+// Tile queries stay centralized so REST fallback and WS tile frames share shape.
 // =============================================================================
 
 internal sealed class TileQueryService(IConfiguration cfg)
